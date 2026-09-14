@@ -1,0 +1,53 @@
+{
+  "name": "Predge-gated allocation",
+  "description": "Move value only when a Predge-signed conviction signal clears the gate. The signal is fetched and its ed25519 signature is verified before this workflow is allowed to run; the workflow itself is the deterministic, audited execution KeeperHub owns.",
+  "trigger": {
+    "id": "trigger",
+    "type": "webhook",
+    "note": "Fired by the Predge integration only after offline signature verification passes. The verified conviction (0-100) and action are passed in as inputs."
+  },
+  "nodes": [
+    {
+      "id": "gate-conviction",
+      "type": "condition",
+      "data": {
+        "op": "and",
+        "checks": [
+          { "left": "{{trigger.action}}", "cmp": "eq", "right": "accumulate" },
+          { "left": "{{trigger.conviction}}", "cmp": "gte", "right": 70 }
+        ]
+      },
+      "onFalse": "halt"
+    },
+    {
+      "id": "dry-run",
+      "type": "action",
+      "data": {
+        "actionType": "web3/transfer-funds",
+        "network": "11155111",
+        "to": "{{env.EXECUTION_TARGET_ADDRESS}}",
+        "amountWei": "{{trigger.amountWei}}",
+        "simulate": true
+      },
+      "note": "Preflight — estimates gas and catches reverts without touching the chain."
+    },
+    {
+      "id": "execute",
+      "type": "action",
+      "dependsOn": "dry-run",
+      "data": {
+        "actionType": "web3/transfer-funds",
+        "network": "11155111",
+        "to": "{{env.EXECUTION_TARGET_ADDRESS}}",
+        "amountWei": "{{trigger.amountWei}}",
+        "idempotencyKey": "{{trigger.nonce}}"
+      },
+      "note": "The exact same movement, executed. Nonce, gas, MEV-aware routing, retries and audit trail are KeeperHub's."
+    }
+  ],
+  "edges": [
+    { "from": "trigger", "to": "gate-conviction" },
+    { "from": "gate-conviction", "to": "dry-run" },
+    { "from": "dry-run", "to": "execute" }
+  ]
+}
