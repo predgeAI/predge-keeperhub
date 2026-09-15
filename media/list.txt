@@ -1,0 +1,17 @@
+file 'frames/01_title.png'
+duration 7.0
+file 'frames/02_gap.png'
+duration 7.78
+file 'frames/03_arch.png'
+duration 14.42
+file 'frames/04_verified.png'
+duration 5.7
+file 'frames/05_executed.png'
+duration 9.1
+file 'frames/06_etherscan.png'
+duration 7.9
+file 'frames/07_tamper.png'
+duration 6.08
+file 'frames/08_close.png'
+duration 6.42
+file 'frames/08_close.png'
