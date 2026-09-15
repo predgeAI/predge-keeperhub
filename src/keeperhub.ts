@@ -2,150 +2,160 @@
  * KeeperHub client — the "deterministic execution" half of the integration.
  *
  * KeeperHub is the execution and reliability layer for onchain agents: an agent
- * composes a workflow, dry-runs it without touching the chain, then that exact
- * workflow executes — nonce management, gas estimation, MEV-aware routing,
- * retries and a full audit trail underneath, non-custodial via Turnkey.
+ * composes a call, dry-runs it without touching the chain, then that exact call
+ * executes — nonce management, gas estimation, MEV-aware routing, retries and a
+ * full audit trail underneath, non-custodial via Turnkey.
  *
- * We drive it two ways, both first-class KeeperHub surfaces:
- *   - MCP  : this repo's workflows are authored by an agent through KeeperHub's
- *            MCP server (app.keeperhub.com/mcp) — "agent-authored workflows".
- *   - API  : the same operations over the REST/tool surface with a kh_ API key,
- *            which is what this module calls so the integration runs headless.
+ * We talk to KeeperHub over its **MCP server** (https://app.keeperhub.com/mcp),
+ * the "agent-authored" surface KeeperHub built for exactly this: this client is
+ * the agent. Transport is MCP Streamable HTTP (JSON-RPC 2.0): initialize to get
+ * a session, then `tools/call`. Auth is the org API key as a Bearer token.
  *
- * Methods map 1:1 onto KeeperHub tools: create_workflow, validate_workflow,
- * execute_workflow, get_execution, execute_contract_call / execute_transfer
- * (with `simulate` for the dry-run and `idempotency_key` for cold-start safety).
+ * The one method we need, execute_transfer, is driven the way KeeperHub is meant
+ * to be: `simulate: true` first (gas + revert check, no broadcast), then the same
+ * arguments with an idempotency key to execute for real.
  */
 
 export interface KeeperHubConfig {
-  apiKey: string;            // kh_...
-  baseUrl?: string;          // default https://app.keeperhub.com
-  network: string;           // "11155111" (Sepolia) for the demo
+  apiKey: string; // kh_...
+  baseUrl?: string; // default https://app.keeperhub.com
+}
+
+export interface TransferParams {
+  chainId: string; // "11155111" (Sepolia)
+  to: string;
+  /** Human-readable units, e.g. "0.001". Must be byte-stable across retries. */
+  amount: string;
+  tokenAddress?: string; // omit for native
+  idempotencyKey?: string;
 }
 
 export interface ExecuteResult {
   simulated: boolean;
-  wouldRevert?: boolean;
+  ok: boolean;
   txHash?: string;
-  executionId?: string;
-  /** Link into the KeeperHub audit trail for this run. */
-  auditUrl?: string;
   raw: unknown;
+  text: string;
 }
 
 const DEFAULT_BASE = "https://app.keeperhub.com";
+const MCP_HEADERS_ACCEPT = "application/json, text/event-stream";
+
+/** Parse a JSON-RPC body that may be plain JSON or a single SSE `data:` frame. */
+function parseRpc(body: string): any {
+  const trimmed = body.trim();
+  if (trimmed.startsWith("data:")) {
+    const line = trimmed.split("\n").find((l) => l.startsWith("data:"));
+    return JSON.parse((line ?? "data:").slice(5).trim());
+  }
+  return JSON.parse(trimmed);
+}
 
 export class KeeperHub {
+  private sessionId?: string;
+  private id = 0;
   constructor(private cfg: KeeperHubConfig) {
     if (!cfg.apiKey) throw new Error("KEEPERHUB_API_KEY required (kh_ prefix).");
   }
+  private base() {
+    return (this.cfg.baseUrl ?? DEFAULT_BASE) + "/mcp";
+  }
+  private headers(): Record<string, string> {
+    const h: Record<string, string> = {
+      authorization: `Bearer ${this.cfg.apiKey}`,
+      "content-type": "application/json",
+      accept: MCP_HEADERS_ACCEPT,
+    };
+    if (this.sessionId) h["mcp-session-id"] = this.sessionId;
+    return h;
+  }
 
-  private async call(path: string, body: unknown): Promise<any> {
-    const res = await fetch((this.cfg.baseUrl ?? DEFAULT_BASE) + path, {
+  /** MCP handshake: initialize (capture session) + initialized notification. */
+  async connect(): Promise<void> {
+    const res = await fetch(this.base(), {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.cfg.apiKey}`,
-      },
-      body: JSON.stringify(body),
+      headers: this.headers(),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: ++this.id,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "predge-keeperhub", version: "0.1.0" },
+        },
+      }),
     });
-    const text = await res.text();
-    let json: any;
-    try {
-      json = text ? JSON.parse(text) : {};
-    } catch {
-      json = { raw: text };
-    }
-    // KeeperHub signals a cold start with a structured, retryable error.
-    if (json?.code === "upstream_cold_start") {
-      const wait = Number(json.retryAfterSeconds ?? 3);
-      await new Promise((r) => setTimeout(r, wait * 1000));
-      return this.call(path, body);
-    }
-    if (!res.ok) throw new Error(`KeeperHub ${path} ${res.status}: ${text}`);
-    return json;
+    this.sessionId = res.headers.get("mcp-session-id") ?? undefined;
+    if (!res.ok) throw new Error(`KeeperHub initialize ${res.status}: ${await res.text()}`);
+    await fetch(this.base(), {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+  }
+
+  private async callTool(name: string, args: Record<string, unknown>): Promise<any> {
+    const res = await fetch(this.base(), {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: ++this.id,
+        method: "tools/call",
+        params: { name, arguments: args },
+      }),
+    });
+    const body = await res.text();
+    const rpc = parseRpc(body);
+    if (rpc.error) throw new Error(`${name}: ${rpc.error.message ?? JSON.stringify(rpc.error)}`);
+    return rpc.result;
+  }
+
+  private static resultText(result: any): string {
+    const content = result?.content;
+    if (Array.isArray(content)) return content.map((c: any) => c?.text ?? "").join("\n");
+    return typeof result === "string" ? result : JSON.stringify(result);
+  }
+
+  /** Pull the first 0x… 32-byte tx hash out of a tool's textual result. */
+  private static extractTxHash(text: string): string | undefined {
+    return text.match(/0x[a-fA-F0-9]{64}/)?.[0];
   }
 
   /**
-   * Move value deterministically, gated by a dry-run first. This is the exact
-   * "simulate, then execute the same thing" flow KeeperHub is built around.
-   *
-   * `simulate: true` estimates gas and catches reverts without broadcasting.
-   * Only if the simulation would not revert do we broadcast with a unique
-   * idempotency key.
+   * Transfer value, dry-run first. `simulate: true` estimates gas and catches
+   * reverts without broadcasting; only a clean simulation broadcasts, under a
+   * stable idempotency key so a retry never double-sends.
    */
-  async executeContractCall(params: {
-    to: string;
-    /** ABI function signature, e.g. "transfer(address,uint256)". */
-    functionSignature: string;
-    args: unknown[];
-    valueWei?: string;
-    idempotencyKey: string;
-  }): Promise<ExecuteResult> {
+  async transfer(p: TransferParams): Promise<{ dryRun: ExecuteResult; executed?: ExecuteResult }> {
     const base = {
-      network: this.cfg.network,
-      to: params.to,
-      functionSignature: params.functionSignature,
-      args: params.args,
-      valueWei: params.valueWei ?? "0",
+      chain_id: p.chainId,
+      to_address: p.to,
+      amount: p.amount,
+      ...(p.tokenAddress ? { token_address: p.tokenAddress } : {}),
     };
 
-    // 1) Dry-run (preflight) — never touches the chain.
-    const sim = await this.call("/api/mcp/execute_contract_call", {
-      ...base,
-      simulate: true,
-    });
-    const wouldRevert = Boolean(sim?.wouldRevert);
-    if (wouldRevert) {
-      return { simulated: true, wouldRevert: true, raw: sim };
-    }
+    const simResult = await this.callTool("execute_transfer", { ...base, simulate: true });
+    const simText = KeeperHub.resultText(simResult);
+    const simOk = !/revert|would revert|error|failed/i.test(simText) || /success|ok|"success":true/i.test(simText);
+    const dryRun: ExecuteResult = { simulated: true, ok: simOk, raw: simResult, text: simText };
+    if (!simOk) return { dryRun };
 
-    // 2) The exact same call, executed for real.
-    const out = await this.call("/api/mcp/execute_contract_call", {
+    const execResult = await this.callTool("execute_transfer", {
       ...base,
-      idempotency_key: params.idempotencyKey,
+      idempotency_key: p.idempotencyKey ?? `predge-${Date.now()}`,
     });
+    const execText = KeeperHub.resultText(execResult);
     return {
-      simulated: false,
-      wouldRevert: false,
-      txHash: out?.txHash ?? out?.transactionHash,
-      executionId: out?.executionId ?? out?.id,
-      auditUrl: out?.auditUrl,
-      raw: out,
-    };
-  }
-
-  /** Native / ERC20 transfer through KeeperHub (dry-run then execute). */
-  async executeTransfer(params: {
-    to: string;
-    amountWei: string;
-    token?: string; // omit for native
-    idempotencyKey: string;
-  }): Promise<ExecuteResult> {
-    const base = {
-      network: this.cfg.network,
-      to: params.to,
-      amount: params.amountWei,
-      token: params.token,
-    };
-    const sim = await this.call("/api/mcp/execute_transfer", { ...base, simulate: true });
-    if (sim?.wouldRevert) return { simulated: true, wouldRevert: true, raw: sim };
-    const out = await this.call("/api/mcp/execute_transfer", {
-      ...base,
-      idempotency_key: params.idempotencyKey,
-    });
-    return {
-      simulated: false,
-      wouldRevert: false,
-      txHash: out?.txHash ?? out?.transactionHash,
-      executionId: out?.executionId ?? out?.id,
-      auditUrl: out?.auditUrl,
-      raw: out,
+      dryRun,
+      executed: {
+        simulated: false,
+        ok: !/error|failed|revert/i.test(execText),
+        txHash: KeeperHub.extractTxHash(execText),
+        raw: execResult,
+        text: execText,
+      },
     };
   }
 }
-
-// NOTE ON TRANSPORT: the exact tool route + payload shape are pinned against a
-// live kh_ key via KeeperHub's MCP server (`claude mcp add ... app.keeperhub.com/mcp`)
-// during integration — the method names above mirror the documented MCP tools
-// (execute_contract_call, execute_transfer, get_execution) so the mapping is 1:1.

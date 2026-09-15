@@ -20,12 +20,12 @@
  */
 import { SignedAttestation, verifyAttestation } from "./attest.js";
 import { KeeperHub } from "./keeperhub.js";
-import { randomUUID } from "node:crypto";
 
 const SIGNAL_URL = process.env.PREDGE_SIGNAL_URL ?? "http://localhost:4055/v1/signal";
 const PINNED_KEY = process.env.PREDGE_SIGNER_KEY_ID; // trust only this signer
 const THRESHOLD = Number(process.env.CONVICTION_THRESHOLD ?? 70);
 const TARGET = process.env.EXECUTION_TARGET_ADDRESS;
+const NETWORK = process.env.NETWORK ?? "11155111"; // Sepolia
 const WALLET = process.argv.find((a) => a.startsWith("0x")) ??
   "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984";
 const TAMPER = process.argv.includes("--tamper");
@@ -73,24 +73,29 @@ async function main() {
     console.log("with Sepolia gas, and re-run. The workflow is in workflow/predge-allocation.workflow.json.");
     return;
   }
-  const kh = new KeeperHub({ apiKey, network: process.env.NETWORK ?? "11155111" });
+  const kh = new KeeperHub({ apiKey });
+  await kh.connect();
 
   // Allocation size scales with conviction (demo: tiny testnet amounts).
-  const amountWei = String(BigInt(sig.conviction) * 10n ** 12n); // conviction * 1e-6 ETH
+  // Human-readable and fixed precision so the idempotency body stays byte-stable.
+  const amount = (sig.conviction / 100000).toFixed(6); // conviction 82 -> "0.000820"
+  const idempotencyKey = `predge-${signed.attestation.nonce}`;
 
-  const out = await kh.executeTransfer({
+  console.log(`\nKeeperHub dry-run (simulate, no chain): transfer ${amount} on chain ${NETWORK} -> ${TARGET}`);
+  const { dryRun, executed } = await kh.transfer({
+    chainId: NETWORK,
     to: TARGET,
-    amountWei,
-    idempotencyKey: `predge-${signed.attestation.nonce}-${randomUUID()}`,
+    amount,
+    idempotencyKey,
   });
-
-  if (out.wouldRevert) {
-    console.error("KeeperHub dry-run says this would revert — not broadcasting.");
+  if (!dryRun.ok) {
+    console.error(`Dry-run would fail — not broadcasting:\n${dryRun.text}`);
     process.exit(3);
   }
+  console.log("Dry-run clean.");
   console.log(`\nEXECUTED through KeeperHub`);
-  console.log(`  tx:    ${out.txHash}`);
-  if (out.auditUrl) console.log(`  audit: ${out.auditUrl}`);
+  if (executed?.txHash) console.log(`  tx:    ${executed.txHash}`);
+  console.log(`  result: ${executed?.text?.slice(0, 500)}`);
   console.log(`\nVerified signal in, deterministic execution out.`);
 }
 

@@ -6,7 +6,7 @@ An agent reads a **Predge**-signed conviction signal, verifies the signature off
 
 - **Live project integrated:** [Predge](https://predge.io) — verifiable smart-money data over x402. Live on Base (27 monetised x402 routes), Arc and Robinhood Chain, with a public leaderboard of 50 top wallets ranked by on-chain conviction.
 - **KeeperHub surfaces used:** MCP (agent-authored workflows), x402, deterministic execution (`simulate` → execute), audit trail.
-- **Proof of execution:** `TX: <pending — filled once executed through KeeperHub on Sepolia>`
+- **Proof of execution (Sepolia, real):** [`0xc95af79acc5fec8e5129c42693f4a54ac732b5ca85d23ea023eaf95b03039ba8`](https://sepolia.etherscan.io/tx/0xc95af79acc5fec8e5129c42693f4a54ac732b5ca85d23ea023eaf95b03039ba8) — status `completed`, block 11708449. Amount **0.000820 ETH** = the verified conviction (82) as a fraction, so the value moved is a direct function of the Predge signal. Executed through KeeperHub's router/relayer with **gas sponsored by KeeperHub** (Turnkey-signed, non-custodial). The demo target is the Predge wallet itself (net-zero, no funds at risk); point `EXECUTION_TARGET_ADDRESS` at any address to move value out.
 
 ## The gap this closes
 
