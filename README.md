@@ -24,6 +24,8 @@ That is the whole loop the agent economy is missing — trust the data you pay f
 
 1. **Predge signs a signal.** `src/signal.ts` serves a conviction signal for a wallet (0–100, plus an `accumulate | reduce | hold` action) as a `SignedAttestation` — an ed25519 signature over a canonical encoding of the payload. In production this is a real per-call x402 purchase off the Predge leaderboard; here the score is a labelled sample and the signature is real.
 2. **The agent verifies offline.** `src/integrate.ts` fetches the signal and verifies it against Predge's pinned key with no call back to the server. Tamper with one byte and verification fails before KeeperHub is ever touched.
+
+   Testing against the live API: `0x0224bb9eb0a5c9fd261ac9123a72cbdd5748292a` is the wallet that currently carries a signal, so `api.predge.io/v1/signal/0x0224bb9eb0a5c9fd261ac9123a72cbdd5748292a` returns a signed 200 you can verify against [the published key](https://api.predge.io/.well-known/predge-keys.json). Signals come and go with the underlying track record, so a `404 no_signal` on some other wallet is a valid answer rather than a fault. If this address ever stops carrying one we will name a different one here.
 3. **The gate.** Only a high-conviction `accumulate` (default: conviction ≥ 70) is allowed to move value.
 4. **KeeperHub executes.** The gated intent goes to KeeperHub via `src/keeperhub.ts`: `simulate: true` dry-runs it (gas + revert check, no chain), then the same call broadcasts with an idempotency key. Nonce management, MEV-aware routing, retries and the audit trail are KeeperHub's. The workflow is also expressed declaratively in `workflow/predge-allocation.workflow.json`.
 5. **Proof.** The integration prints the transaction hash executed through KeeperHub.
@@ -59,7 +61,7 @@ KeeperHub  ──simulate──▶ dry-run (no chain) ──▶ execute ──�
 
 ## Bounty (separate BUIDL): Best KeeperHub Feature
 
-Stacking submission — a PR to `github.com/keeperhub/keeperhub`: a **Predge signal plugin** (a condition/trigger node that fetches a Predge attestation and exposes `conviction`, `action` and a verified-signature boolean to a workflow), scaffolded with `pnpm create-plugin` in `plugins/`. Judged on mergeability; lets any KeeperHub workflow gate on verified Predge data without leaving KeeperHub.
+Stacking submission — a PR to `github.com/keeperhub/keeperhub`: a **Predge signal plugin** (a condition/trigger node that fetches a Predge attestation, verifies it, and exposes `conviction` and `action` to a workflow; there is deliberately no `verified` flag, because the step fails closed when verification does not hold, so a successful step is a verified signal and there is nothing for an author to forget to gate on), scaffolded with `pnpm create-plugin` in `plugins/`. Judged on mergeability; lets any KeeperHub workflow gate on verified Predge data without leaving KeeperHub.
 
 ## Run it
 
